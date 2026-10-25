@@ -1,0 +1,97 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="theme-color" content="#0b0b0d">
+<title>HHN Night Ops</title>
+<style>
+:root{--bg:#0b0b0d;--s:#16161a;--b:#26262c;--t:#f2f2f4;--m:#8e8e98;--r:#c1121f;--ok:#30d158;--w:#ffd60a}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(900px 400px at 50% -100px,#2a0a0e,var(--bg));color:var(--t);font:16px -apple-system,system-ui,sans-serif;padding:env(safe-area-inset-top) 0 calc(80px + env(safe-area-inset-bottom))}
+main{max-width:640px;margin:auto;padding:14px}h1{font-size:22px;margin:4px 0}h2{font-size:13px;color:var(--m);text-transform:uppercase;letter-spacing:.08em;margin:18px 0 8px}
+.c{background:var(--s);border:1px solid var(--b);border-radius:16px;padding:14px;margin-bottom:10px}.hero{border-color:#5a141a;box-shadow:0 0 40px #c1121f22}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px}.m{color:var(--m);font-size:13px}.big{font-size:26px;font-weight:700}
+button,select,input{font:inherit;color:var(--t);background:#202026;border:1px solid var(--b);border-radius:12px;padding:12px;min-height:46px}
+button.p{background:var(--r);border-color:var(--r);font-weight:600}button{cursor:pointer}.g{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:#101013ee;backdrop-filter:blur(14px);border-top:1px solid var(--b);padding-bottom:env(safe-area-inset-bottom)}
+nav button{flex:1;border:0;background:none;border-radius:0;min-height:56px;color:var(--m)}nav button.on{color:var(--t);box-shadow:inset 0 2px var(--r)}
+.tag{font-size:11px;padding:2px 7px;border-radius:99px;border:1px solid var(--b)}.live{color:var(--ok)}.stale{color:var(--w)}.bad{color:#ff453a}
+.warn{border-color:#6b5a00;background:#1d1a08}input[type=number]{width:72px}textarea{width:100%;background:#202026;color:var(--t);border:1px solid var(--b);border-radius:12px;padding:10px}
+</style></head><body><main id="app"></main><nav id="nav"></nav>
+<script type="module">
+import {HOUSE_IDS,PARK_URL,parseQueueTimes,rank,isStale,ageMin,STRATEGIES} from './engine.js';
+const EVENT='2026-10-29',KEY='hhn-night-ops:'+EVENT,$=s=>document.querySelector(s);
+const def={start:null,depart:'',strategy:'balanced',express:true,expressEst:15,duration:15,houses:{},q:{active:null,log:[]},snap:null,notes:''};
+let S=Object.assign(def,JSON.parse(localStorage.getItem(KEY)||'{}')),tab='tonight',diag={ok:null,err:null,n:0,last:null,tries:0},pos=null;
+const save=()=>{localStorage.setItem(KEY,JSON.stringify(S));draw()};
+const H=id=>S.houses[id]??={walk:8,must:false,rating:null,notes:'',done:false,visits:0,manual:null};
+const fmt=iso=>iso?new Date(iso).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'—';
+const mins=ms=>Math.round(ms/60000);
+// ---- live provider: Queue-Times public JSON (attribution required). Snapshot preserved on failure, never shown as current.
+async function refresh(){diag.tries++;try{
+  const r=await fetch(PARK_URL,{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);
+  const hs=parseQueueTimes(await r.json());diag.n=hs.length;
+  if(!hs.length)throw new Error('Response OK but contained 0 HHN house entries — not treated as live.');
+  S.snap={fetchedAt:new Date().toISOString(),houses:hs};diag.ok=true;diag.err=null;diag.last=S.snap.fetchedAt;
+}catch(e){diag.ok=false;diag.err=String(e.message||e)+(location.protocol==='file:'?' (file:// origin may be blocked; host over https)':'')}save()}
+function houses(){const snap=S.snap?.houses||[];return HOUSE_IDS.map(id=>{const s=snap.find(x=>x.id===id),u=H(id);
+  const man=u.manual&&(!s||Date.parse(u.manual.at)>Date.parse(s.updated||0))?u.manual:null;
+  return{id,name:s?.name||'House '+id,open:s?s.open:true,wait:man?man.wait:s?.wait,updated:man?man.at:s?.updated,src:man?'manual':s?'Queue-Times':'none',...u}})}
+function left(){if(!S.depart)return Infinity;const[h,m]=S.depart.split(':').map(Number),d=new Date();d.setHours(h,m,0,0);if(d<new Date())d.setDate(d.getDate()+1);return mins(d-Date.now())}
+const opts=()=>({now:Date.now(),express:S.express,expressEst:expAvg(),duration:S.duration,minsLeft:left(),strategy:S.strategy,staleMin:10});
+function expAvg(){const e=S.q.log.filter(x=>x.express&&x.out);return e.length?Math.round(e.reduce((a,x)=>a+mins(Date.parse(x.out)-Date.parse(x.in)),0)/e.length):S.expressEst}
+const feed=()=>{if(!S.snap)return['none','No live data yet'];const a=ageMin(S.snap.fetchedAt);
+  if(diag.ok===false)return['stale','Provider failing — showing last snapshot from '+fmt(S.snap.fetchedAt)+' (NOT live)'];
+  return a>3?['stale','Last refresh '+Math.round(a)+' min ago — stale']:['live','Queue-Times, fetched '+fmt(S.snap.fetchedAt)+' (third-party, ~5 min cadence)']};
+// ---- actions
+window.A={
+ join(id){const u=H(id),hs=houses().find(h=>h.id===id);S.q.active={id,in:new Date().toISOString(),posted:hs.wait,express:S.express};u.status='queue';save()},
+ leave(){const a=S.q.active;if(!a)return;S.q.log.push({...a,out:new Date().toISOString()});S.q.active=null;save()},
+ done(id){const u=H(id);u.done=true;u.visits++;u.doneAt=new Date().toISOString();if(S.q.active?.id===id)A.leave();save()},
+ undo(id){H(id).done=false;save()},rate(id,v){H(id).rating=+v||null;save()},must(id){H(id).must=!H(id).must;save()},
+ walk(id,v){H(id).walk=Math.max(0,+v||0);save()},note(id,v){H(id).notes=v;localStorage.setItem(KEY,JSON.stringify(S))},
+ man(id){const v=prompt('Observed wait (minutes)?');if(v===null||isNaN(+v))return;H(id).manual={wait:+v,at:new Date().toISOString()};save()},
+ fixq(i,f){const x=S.q.log[i],v=prompt('New time HH:MM',new Date(x[f]).toTimeString().slice(0,5));if(!v)return;const d=new Date(x[f]);const[h,m]=v.split(':');d.setHours(+h,+m);x[f]=d.toISOString();save()},
+ set(k,v){S[k]=v;save()},tab(t){tab=t;draw()},refresh,
+ start(){S.start=new Date().toISOString();save()},
+ gps(){navigator.geolocation?navigator.geolocation.getCurrentPosition(p=>{pos=p.coords;draw()},e=>{pos={err:e.message};draw()},{enableHighAccuracy:true}):pos={err:'Geolocation unsupported'};},
+ reset(){if(confirm('Erase ALL data for '+EVENT+'?')&&confirm('Really erase? This cannot be undone.')){localStorage.removeItem(KEY);location.reload()}},
+ exp(){const b=new Blob([JSON.stringify(S,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='hhn-'+EVENT+'.json';a.click()},
+ imp(el){el.files[0].text().then(t=>{S=Object.assign(def,JSON.parse(t));save()})},
+ copy(){navigator.clipboard.writeText(recap()).then(()=>alert('Recap copied'))}};
+function stats(){const hs=houses(),d=hs.filter(h=>h.done),r=d.filter(h=>h.rating),L=S.q.log.filter(x=>x.out).map(x=>({...x,act:mins(Date.parse(x.out)-Date.parse(x.in))}));
+ const tot=L.reduce((a,x)=>a+x.act,0),cmp=L.filter(x=>x.posted!=null&&!x.express);
+ return{hs,d,avg:r.length?(r.reduce((a,h)=>a+h.rating,0)/r.length).toFixed(1):'—',L,tot,
+  longest:L.sort((a,b)=>b.act-a.act)[0],fav:[...r].sort((a,b)=>b.rating-a.rating)[0],low:[...r].sort((a,b)=>a.rating-b.rating)[0],
+  saved:cmp.reduce((a,x)=>a+(x.posted-x.act),0),ncmp:cmp.length,walk:d.reduce((a,h)=>a+h.walk,0)}}
+function recap(){const s=stats(),n=id=>houses().find(h=>h.id===id)?.name;
+ return`HHN Night Ops — ${EVENT}\nHouses: ${s.d.length}/${HOUSE_IDS.length}\nAvg rating: ${s.avg}\nQueue time recorded: ${s.tot} min\n`+(s.fav?`Favorite: ${s.fav.name} (${s.fav.rating})\n`:'')+(s.low?`Lowest: ${s.low.name} (${s.low.rating})\n`:'')+s.d.map(h=>`• ${h.name}${h.rating?' — '+h.rating+'/10':''}${h.notes?': '+h.notes:''}`).join('\n')+(S.notes?'\n\nNotes: '+S.notes:'')}
+// ---- views
+const card=(r,top)=>`<div class="c ${top?'hero':''}"><div class="row"><div><b>${r.name}</b><div class="m">${r.reason}</div></div><div class="big">${r.cost}<span class="m">m</span></div></div>
+ <div class="m">Posted standby: ${r.wait??'—'} min · <span class="${r.stale?'stale':'live'}">${r.src} · updated ${fmt(r.updated)}${r.stale?' (STALE)':''}</span></div>
+ <div class="g" style="margin-top:8px">${S.q.active?.id===r.id?`<button class="p" onclick="A.leave()">Leave queue</button>`:`<button onclick="A.join(${r.id})">Join queue</button>`}<button class="p" onclick="A.done(${r.id})">Completed</button></div></div>`;
+function tonight(){const o=opts(),rk=rank(houses(),o),[cls,msg]=feed(),s=stats(),lf=left();
+ const t=o.minsLeft;return`<h1>HHN Night Ops</h1><div class="m">Halloween Horror Nights · Thu Oct 29, 2026 · ${new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}${S.start?' · elapsed '+mins(Date.now()-Date.parse(S.start))+' min':''}</div>
+ ${new Date().toLocaleDateString('en-CA')!==EVENT?`<div class="c warn">Today isn't ${EVENT}. Data below is saved under the event date only.</div>`:''}
+ <div class="c ${cls==='live'?'':'warn'}"><div class="row"><span class="${cls}"><b>${cls==='live'?'LIVE (third-party)':cls==='stale'?'STALE':'NO LIVE DATA'}</b></span><button onclick="A.refresh()">Refresh</button></div><div class="m">${msg}</div>${diag.err?`<div class="bad m">${diag.err}</div>`:''}</div>
+ <div class="g"><div class="c"><div class="big">${s.d.length}/${HOUSE_IDS.length}</div><div class="m">houses done</div></div><div class="c"><div class="big">${s.tot}m</div><div class="m">queue time · avg rating ${s.avg}</div></div></div>
+ <h2>Go here next</h2>${S.q.active?`<div class="c warn">In queue: ${houses().find(h=>h.id===S.q.active.id).name} since ${fmt(S.q.active.in)} (${mins(Date.now()-Date.parse(S.q.active.in))} min) <button onclick="A.leave()">Leave</button></div>`:''}
+ ${rk[0]?card(rk[0],1):'<div class="c">No open, uncompleted houses reported.</div>'}${rk.slice(1,4).map(r=>card(r)).join('')}
+ <h2>Plan</h2><div class="c"><div class="row"><span>Departure</span><input type="time" value="${S.depart}" onchange="A.set('depart',this.value)"></div><div class="m">${lf===Infinity?'No departure set':lf+' min usable time left'}</div>
+ <div class="row" style="margin-top:8px"><span>Express Unlimited</span><button onclick="A.set('express',${!S.express})">${S.express?'ON':'OFF'}</button></div>
+ <div class="row" style="margin-top:8px"><span>Express wait (min)</span><input type="number" value="${S.expressEst}" onchange="A.set('expressEst',+this.value)"></div><div class="m">Using ${expAvg()} min${S.q.log.some(x=>x.express&&x.out)?' (avg of your recorded Express queues)':' — your assumption, not data'}. Posted standby is NOT used as your Express wait.</div>
+ <div class="row" style="margin-top:8px"><span>Strategy</span><select onchange="A.set('strategy',this.value)">${Object.entries(STRATEGIES).map(([k,v])=>`<option value="${k}" ${k===S.strategy?'selected':''}>${v}</option>`).join('')}</select></div>
+ <div class="row" style="margin-top:8px"><span>Experience (min)</span><input type="number" value="${S.duration}" onchange="A.set('duration',+this.value)"></div>
+ <div class="g" style="margin-top:8px"><button onclick="A.start()">${S.start?'Restart clock':'Start night'}</button><button onclick="A.gps()">GPS</button></div><div class="m">${pos?pos.err?'GPS: '+pos.err:'GPS: '+pos.latitude.toFixed(4)+', '+pos.longitude.toFixed(4)+' (not used for routing — no verified house coordinates)':'GPS off. Walk times are your editable estimates.'}</div></div>`}
+function tracker(){return`<h1>Houses</h1><div class="m">Names/IDs from Queue-Times (park 65, "Halloween" land). Verify against Universal's official lineup.</div>`+houses().map(h=>`<div class="c"><div class="row"><b>${h.name}</b><span class="tag">${h.done?'Completed':S.q.active?.id===h.id?'In queue':'Not visited'}</span></div>
+ <div class="m">${!h.open?'Closed · ':''}Standby ${h.wait??'—'} min · ${h.src} · ${fmt(h.updated)} · visits ${h.visits}</div>
+ <div class="row" style="margin-top:8px"><span class="m">Walk (min, est.)</span><input type="number" value="${h.walk}" onchange="A.walk(${h.id},this.value)"><span class="m">Rating</span><input type="number" min="1" max="10" value="${h.rating??''}" onchange="A.rate(${h.id},this.value)"></div>
+ <textarea rows="2" placeholder="Notes" onchange="A.note(${h.id},this.value)">${h.notes}</textarea>
+ <div class="g" style="margin-top:8px"><button onclick="A.man(${h.id})">Enter wait</button><button onclick="A.must(${h.id})">${h.must?'★ Must-see':'☆ Must-see'}</button><button onclick="${h.done?`A.undo(${h.id})`:`A.done(${h.id})`}">${h.done?'Undo done':'Mark done'}</button><button onclick="A.join(${h.id})">Join queue</button></div></div>`).join('')}
+function statsV(){const s=stats();return`<h1>Stats</h1><div class="c">Houses ${s.d.length}/${HOUSE_IDS.length} (${Math.round(100*s.d.length/HOUSE_IDS.length)}%) · avg rating ${s.avg}<br>Queue total ${s.tot} min · est. walking ${s.walk} min (your estimates)<br>Longest queue ${s.longest?s.longest.act+' min':'—'} · Favorite ${s.fav?.name||'—'} · Lowest ${s.low?.name||'—'}<br>vs posted (standby only, ${s.ncmp} samples): ${s.ncmp?(s.saved>=0?s.saved+' min saved':-s.saved+' min lost'):'n/a'}</div>
+ <h2>Queue log</h2>${S.q.log.map((x,i)=>`<div class="c"><b>${houses().find(h=>h.id===x.id)?.name}</b> ${x.express?'(Express)':'(Standby)'}<div class="m">${fmt(x.in)} → ${fmt(x.out)} = ${mins(Date.parse(x.out)-Date.parse(x.in))} min · posted ${x.posted??'—'}</div><button onclick="A.fixq(${i},'in')">Edit in</button> <button onclick="A.fixq(${i},'out')">Edit out</button></div>`).join('')||'<div class="m">No queues yet.</div>'}
+ <h2>Night notes</h2><textarea rows="3" onchange="A.set('notes',this.value)">${S.notes}</textarea>
+ <div class="g" style="margin-top:8px"><button class="p" onclick="A.copy()">Copy recap</button><button onclick="A.exp()">Export JSON</button><label class="c m" style="margin:0">Import<input type="file" onchange="A.imp(this)"></label><button onclick="A.reset()">Reset</button></div>`}
+function data(){const[c,m]=feed();return`<h1>Data</h1><div class="c"><b>Provider:</b> Queue-Times.com public JSON (<a style="color:var(--t)" href="https://queue-times.com/">Powered by Queue-Times.com</a>)<br><b>Endpoint:</b> <span class="m">${PARK_URL}</span><br><b>Status:</b> <span class="${c}">${diag.ok===null?'not yet attempted':diag.ok?'OK':'FAILING'}</span><br><b>Attempts:</b> ${diag.tries} · <b>Last success:</b> ${diag.last?fmt(diag.last):'—'}<br><b>Houses returned:</b> ${diag.n} of ${HOUSE_IDS.length}<br><b>Error:</b> ${diag.err||'none'}</div>
+ <div class="c m">Provider says waits come from the park's published feed, collected every ~5 min; the app polls every 60 s but data won't change that fast. Posted standby only — not Express. Manual entries are labeled "manual".</div>`+houses().map(h=>`<div class="m">${h.id} ${h.name}: ${h.open?'open':'closed'} ${h.wait??'—'}m · ${h.src} · ${h.updated||'—'}</div>`).join('')}
+function draw(){const a=document.activeElement;if(a&&a.tagName==='TEXTAREA')return;$('#app').innerHTML={tonight,tracker,stats:statsV,data}[tab]();
+ $('#nav').innerHTML=[['tonight','Tonight'],['tracker','Houses'],['stats','Stats'],['data','Data']].map(([k,l])=>`<button class="${tab===k?'on':''}" onclick="A.tab('${k}')">${l}</button>`).join('')}
+draw();refresh();setInterval(()=>{if(!document.hidden)refresh()},60000);setInterval(()=>{if(tab==='tonight')draw()},30000);
+</script></body></html>
